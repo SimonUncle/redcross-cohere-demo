@@ -1,0 +1,13 @@
+cohere>=5.0.0
+cohere-compass-sdk
+chromadb
+streamlit
+reportlab
+pdfplumber
+python-dotenv
+numpy
+openai
+fastapi
+uvicorn
+sse-starlette
+python-multipart
