@@ -38,6 +38,8 @@ export function VisionPanel() {
     setElapsed(null);
     const t0 = Date.now();
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
     try {
       // Fetch actual image and send to Vision API
       const imgResp = await fetch("/sample_prescription.jpg");
@@ -45,7 +47,7 @@ export function VisionPanel() {
       const realFile = new File([imgBlob], "sample_prescription.jpg", {
         type: "image/jpeg",
       });
-      const result = await analyzeVision(realFile);
+      const result = await analyzeVision(realFile, controller.signal);
       setVisionOcrText(result.ocr_text);
       if (result.pipeline_result) {
         setPipelineResult(result.pipeline_result);
@@ -82,6 +84,7 @@ Date: March 5, 2026  |  City Health Pharmacy`;
       });
       setElapsed(Math.round((Date.now() - t0) / 100) / 10);
     } finally {
+      clearTimeout(timeout);
       setIsProcessing(false);
     }
   };

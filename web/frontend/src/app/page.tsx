@@ -29,7 +29,7 @@ function MainContent() {
       <Header />
 
       <div className="flex-1 overflow-auto">
-        <div className="mx-auto max-w-[1440px] px-4 py-6 lg:px-6">
+        <div className="mx-auto max-w-[1600px] px-4 py-6 lg:px-6">
           <div className="flex gap-6">
             {/* Main content area */}
             <div className="flex-1 min-w-0 space-y-6">
@@ -73,7 +73,7 @@ function MainContent() {
             </div>
 
             {/* Sidebar */}
-            <div className="hidden w-[340px] shrink-0 lg:block">
+            <div className="hidden w-[300px] shrink-0 lg:block">
               <Sidebar />
             </div>
           </div>

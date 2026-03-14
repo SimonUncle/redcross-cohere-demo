@@ -9,31 +9,35 @@ interface JudgmentCardProps {
   judgment: JudgmentResult;
 }
 
+const ELIGIBLE_STYLE = {
+  bg: "bg-[#F0FFF4]",
+  border: "border-l-brand-green",
+  icon: CheckCircle2,
+  iconColor: "text-brand-green",
+  labelKey: "judgment.eligible" as const,
+  labelBg: "bg-brand-green/10 text-brand-green",
+};
+const CONDITIONAL_STYLE = {
+  bg: "bg-[#FFFAF0]",
+  border: "border-l-brand-orange",
+  icon: AlertTriangle,
+  iconColor: "text-brand-orange",
+  labelKey: "judgment.conditional" as const,
+  labelBg: "bg-brand-orange/10 text-brand-orange",
+};
+const INELIGIBLE_STYLE = {
+  bg: "bg-[#FFF5F5]",
+  border: "border-l-brand-red",
+  icon: XCircle,
+  iconColor: "text-brand-red",
+  labelKey: "judgment.ineligible" as const,
+  labelBg: "bg-brand-red/10 text-brand-red",
+};
+
 const variants = {
-  즉시가능: {
-    bg: "bg-[#F0FFF4]",
-    border: "border-l-brand-green",
-    icon: CheckCircle2,
-    iconColor: "text-brand-green",
-    labelKey: "judgment.eligible" as const,
-    labelBg: "bg-brand-green/10 text-brand-green",
-  },
-  조건부: {
-    bg: "bg-[#FFFAF0]",
-    border: "border-l-brand-orange",
-    icon: AlertTriangle,
-    iconColor: "text-brand-orange",
-    labelKey: "judgment.conditional" as const,
-    labelBg: "bg-brand-orange/10 text-brand-orange",
-  },
-  불가: {
-    bg: "bg-[#FFF5F5]",
-    border: "border-l-brand-red",
-    icon: XCircle,
-    iconColor: "text-brand-red",
-    labelKey: "judgment.ineligible" as const,
-    labelBg: "bg-brand-red/10 text-brand-red",
-  },
+  즉시가능: ELIGIBLE_STYLE, Eligible: ELIGIBLE_STYLE,
+  조건부: CONDITIONAL_STYLE, Conditional: CONDITIONAL_STYLE,
+  불가: INELIGIBLE_STYLE, Ineligible: INELIGIBLE_STYLE,
 };
 
 export function JudgmentCard({ judgment }: JudgmentCardProps) {
@@ -77,6 +81,11 @@ export function JudgmentCard({ judgment }: JudgmentCardProps) {
                 </li>
               ))}
             </ul>
+          )}
+          {judgment.citation && (
+            <p className="mt-2 text-xs text-gray-500">
+              {t("judgment.source")}: {judgment.citation}
+            </p>
           )}
         </div>
       </div>

@@ -38,10 +38,12 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     query: str
     model: Optional[str] = None
+    lang: Optional[str] = "ko"
 
 
 class CompareRequest(BaseModel):
     query: str
+    lang: Optional[str] = "ko"
 
 
 class TranslateRequest(BaseModel):
@@ -78,7 +80,7 @@ async def chat_stream(req: ChatRequest):
             queue: asyncio.Queue = asyncio.Queue()
 
             def _produce():
-                for evt in _collect_stream_events(req.query, req.model):
+                for evt in _collect_stream_events(req.query, req.model, req.lang):
                     loop.call_soon_threadsafe(queue.put_nowait, evt)
                 loop.call_soon_threadsafe(queue.put_nowait, None)
 
@@ -98,10 +100,10 @@ async def chat_stream(req: ChatRequest):
     )
 
 
-def _collect_stream_events(query: str, model: Optional[str]):
+def _collect_stream_events(query: str, model: Optional[str], lang: Optional[str] = "ko"):
     """Consume run_agent_stream and yield SSE-formatted dicts."""
     try:
-        stream = run_agent_stream(query, model=model)
+        stream = run_agent_stream(query, model=model, lang=lang or "ko")
         for event in stream:
             etype = event.get("type")
 
@@ -126,11 +128,14 @@ def _collect_stream_events(query: str, model: Optional[str]):
                     "status": "done",
                 })
 
+            elif etype == "sources":
+                yield _sse_event("sources", {"data": event.get("data", [])})
+
             elif etype == "tool_plan":
                 yield _sse_event("tool_plan", {"text": event.get("text", "")})
 
             elif etype == "content_delta":
-                yield _sse_event("content_delta", {"text": event.get("text", "")})
+                yield _sse_event("text_delta", {"text": event.get("text", "")})
 
             elif etype == "thinking":
                 yield _sse_event("thinking", {"text": event.get("text", "")})
@@ -160,19 +165,37 @@ def _collect_stream_events(query: str, model: Optional[str]):
 @app.post("/api/chat/compare")
 async def chat_compare(req: CompareRequest):
     loop = asyncio.get_event_loop()
+    lang = req.lang or "ko"
+    fast_future = loop.run_in_executor(
+        None,
+        lambda: run_agent(req.query, thinking_enabled=False, model=MODEL_FAST, lang=lang),
+    )
+    reasoning_future = loop.run_in_executor(
+        None,
+        lambda: run_agent(req.query, thinking_enabled=True, model=MODEL_REASONING, lang=lang),
+    )
+
+    # Run both models; if one fails, return partial result with error for the failed one
+    fast_result = None
+    reasoning_result = None
+    errors = {}
+
     try:
-        fast_future = loop.run_in_executor(
-            None,
-            lambda: run_agent(req.query, thinking_enabled=False, model=MODEL_FAST),
-        )
-        reasoning_future = loop.run_in_executor(
-            None,
-            lambda: run_agent(req.query, thinking_enabled=True, model=MODEL_REASONING),
-        )
-        fast_result, reasoning_result = await asyncio.gather(fast_future, reasoning_future)
-        return {"command_a": fast_result, "reasoning": reasoning_result}
+        fast_result = await fast_future
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        errors["command_a"] = str(exc)
+        fast_result = {"error": str(exc), "answer": f"Error: {exc}", "judgment": {}, "tool_calls": []}
+
+    try:
+        reasoning_result = await reasoning_future
+    except Exception as exc:
+        errors["reasoning"] = str(exc)
+        reasoning_result = {"error": str(exc), "answer": f"Error: {exc}", "judgment": {}, "tool_calls": []}
+
+    if len(errors) == 2:
+        raise HTTPException(status_code=500, detail=f"Both models failed: {errors}")
+
+    return {"command_a": fast_result, "reasoning": reasoning_result}
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +208,20 @@ async def vision(file: UploadFile = File(...)):
         image_bytes = await file.read()
         loop = asyncio.get_event_loop()
         ocr_text = await loop.run_in_executor(None, analyze_prescription, image_bytes)
-        return {"ocr_text": ocr_text}
+
+        # OCR 결과를 에이전트 파이프라인에 전달하여 판정
+        agent_query = f"다음 처방전 OCR 결과를 바탕으로 각 약물별 헌혈 가능 여부를 판정해주세요:\n\n{ocr_text}"
+        agent_result = await loop.run_in_executor(
+            None, lambda: run_agent(agent_query)
+        )
+
+        return {
+            "ocr_text": ocr_text,
+            "pipeline_result": {
+                "judgment": agent_result.get("judgment"),
+                "answer": agent_result.get("answer"),
+            },
+        }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

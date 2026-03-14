@@ -112,32 +112,6 @@ function ModelPanel({
         </CardHeader>
         <CardContent className="p-4">
           <div className="space-y-3">
-              {/* Classification */}
-              {data.classification && (() => {
-                const classType = data.classification.type || data.classification.complexity || "단순";
-                const isSimple = classType === "단순";
-                const keywords = data.classification.keywords || data.classification.matched_keywords || [];
-                return (
-                <div className="flex items-center gap-2">
-                  <Badge
-                    variant="outline"
-                    className={
-                      isSimple
-                        ? "border-brand-green/30 text-brand-green text-xs"
-                        : "border-brand-blue/30 text-brand-blue text-xs"
-                    }
-                  >
-                    {isSimple ? t("classification.simple") : t("classification.complex")}
-                  </Badge>
-                  {keywords.map((kw, i) => (
-                    <Badge key={i} variant="secondary" className="text-[10px]">
-                      {kw}
-                    </Badge>
-                  ))}
-                </div>
-                );
-              })()}
-
               {/* Thinking section (Reasoning only) */}
               {showThinking && (
                 <div

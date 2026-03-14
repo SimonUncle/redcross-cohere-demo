@@ -24,7 +24,8 @@ export function ChatArea() {
 
   if (!query) return null;
 
-  const displayText = answer || streamingText;
+  const rawText = answer || streamingText;
+  const displayText = rawText?.replace(/\n?\[JUDGMENT:.*?\]/g, "").trim() || "";
 
   return (
     <motion.div

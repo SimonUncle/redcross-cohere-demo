@@ -17,7 +17,7 @@ interface LocaleContextValue {
 const LocaleContext = createContext<LocaleContextValue | null>(null);
 
 export function LocaleProvider({ children }: { children: React.ReactNode }) {
-  const [locale, setLocale] = useState<Locale>("ko");
+  const [locale, setLocale] = useState<Locale>("en");
 
   const t = useCallback(
     (key: LocaleKey, vars?: Record<string, string | number>) => {

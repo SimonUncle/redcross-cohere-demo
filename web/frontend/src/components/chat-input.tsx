@@ -1,83 +1,25 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useAppState } from "@/lib/store";
 import { useLocale } from "@/lib/locale-context";
-import { streamChat } from "@/lib/api";
+import { runStream } from "@/lib/sse-handler";
 import { Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
-
-function handleSSEEvent(
-  event: { event: string; data: unknown },
-  state: ReturnType<typeof useAppState>
-) {
-  const data = event.data as Record<string, unknown>;
-
-  switch (event.event) {
-    case "classification":
-      state.setClassification(
-        data as unknown as ReturnType<typeof useAppState>["classification"]
-      );
-      break;
-    case "tool_call":
-      state.addToolCall(
-        data as unknown as ReturnType<typeof useAppState>["toolCalls"][0]
-      );
-      break;
-    case "judgment":
-      state.setJudgment(
-        data as unknown as ReturnType<typeof useAppState>["judgment"]
-      );
-      break;
-    case "text_delta": {
-      const chunk = (data as { text?: string }).text || "";
-      state.appendStreamingText(chunk);
-      break;
-    }
-    case "answer":
-      state.setAnswer((data as { text?: string }).text || "");
-      break;
-    case "timing":
-      state.setTiming(data as ReturnType<typeof useAppState>["timing"]);
-      break;
-    case "done":
-      if (state.streamingText) {
-        state.setAnswer(state.streamingText);
-      }
-      state.setTokens(
-        (data as { total_tokens?: unknown }).total_tokens as ReturnType<
-          typeof useAppState
-        >["tokens"]
-      );
-      state.setIsStreaming(false);
-      break;
-  }
-}
 
 export function ChatInput() {
   const [input, setInput] = useState("");
   const state = useAppState();
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
+  const abortRef = useRef<AbortController | null>(null);
 
   const handleSubmit = async () => {
     const query = input.trim();
     if (!query || state.isStreaming) return;
-
     setInput("");
-    state.reset();
-    state.setMode("custom");
-    state.setQuery(query);
-    state.setIsStreaming(true);
-
-    try {
-      for await (const event of streamChat({ query })) {
-        handleSSEEvent(event, state);
-      }
-    } catch (err) {
-      console.error("Stream error:", err);
-    } finally {
-      state.setIsStreaming(false);
-    }
+    await runStream({
+      query, lang: locale, mode: "custom", state, abortRef,
+    });
   };
 
   return (

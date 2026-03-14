@@ -4,9 +4,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
+import { useRef } from "react";
 import { useAppState } from "@/lib/store";
 import { useLocale } from "@/lib/locale-context";
-import { streamChat, fetchCompare } from "@/lib/api";
+import { fetchCompare } from "@/lib/api";
+import { runStream } from "@/lib/sse-handler";
 import { Search, GitCompare, Puzzle, FileText } from "lucide-react";
 
 const container = {
@@ -24,56 +26,38 @@ const item = {
 
 export function DemoCards() {
   const state = useAppState();
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
+  const abortRef = useRef<AbortController | null>(null);
 
-  const handleDemo1 = async () => {
-    state.reset();
-    state.setMode("demo1");
-    const query = "아스피린 복용 후 헌혈 가능한가요? 3일 전 복용했습니다.";
-    state.setQuery(query);
-    state.setIsStreaming(true);
+  const handleDemo1 = () =>
+    runStream({
+      query: locale === "en"
+        ? "I took aspirin 3 days ago. Can I donate blood?"
+        : "아스피린 복용 후 헌혈 가능한가요? 3일 전 복용했습니다.",
+      lang: locale, mode: "demo1", state, abortRef,
+      fallback: simulateDemo1,
+    });
 
-    try {
-      for await (const event of streamChat({ query })) {
-        handleSSEEvent(event, state);
-      }
-    } catch (err) {
-      console.error("Stream error:", err);
-      simulateDemo1(state);
-    } finally {
-      state.setIsStreaming(false);
-    }
-  };
-
-  const handleDemo1b = async () => {
-    state.reset();
-    state.setMode("demo1b");
-    const query = "지난달에 문신을 했는데 헌혈 가능한가요?";
-    state.setQuery(query);
-    state.setIsStreaming(true);
-
-    try {
-      for await (const event of streamChat({ query })) {
-        handleSSEEvent(event, state);
-      }
-    } catch (err) {
-      console.error("Stream error:", err);
-      simulateDemo1b(state);
-    } finally {
-      state.setIsStreaming(false);
-    }
-  };
+  const handleDemo1b = () =>
+    runStream({
+      query: locale === "en"
+        ? "I got a tattoo last month. Can I donate blood?"
+        : "지난달에 문신을 했는데 헌혈 가능한가요?",
+      lang: locale, mode: "demo1b", state, abortRef,
+      fallback: simulateDemo1b,
+    });
 
   const handleDemo2 = async () => {
     state.reset();
     state.setMode("demo2");
-    const query =
-      "3주 전 파푸아뉴기니에서 귀국했고, 5일 전 아스피린을 복용했습니다. 헌혈 가능한가요?";
+    const query = locale === "en"
+      ? "I returned from Papua New Guinea 3 weeks ago and took aspirin 5 days ago. Can I donate blood?"
+      : "3주 전 파푸아뉴기니에서 귀국했고, 5일 전 아스피린을 복용했습니다. 헌혈 가능한가요?";
     state.setQuery(query);
     state.setIsStreaming(true);
 
     try {
-      const result = await fetchCompare(query);
+      const result = await fetchCompare(query, locale);
       state.setCompareResult(result);
     } catch (err) {
       console.error("Compare error:", err);
@@ -93,23 +77,12 @@ export function DemoCards() {
     state.setMode("demo3-translate");
   };
 
-  const handleCustomQuery = async (query: string) => {
+  const handleCustomQuery = (query: string) => {
     if (!query.trim()) return;
-    state.reset();
-    state.setMode("custom");
-    state.setQuery(query);
-    state.setIsStreaming(true);
-
-    try {
-      for await (const event of streamChat({ query })) {
-        handleSSEEvent(event, state);
-      }
-    } catch (err) {
-      console.error("Stream error:", err);
-      simulateCustom(state, query);
-    } finally {
-      state.setIsStreaming(false);
-    }
+    runStream({
+      query, lang: locale, mode: "custom", state, abortRef,
+      fallback: (s) => simulateCustom(s, query),
+    });
   };
 
   return (
@@ -120,7 +93,7 @@ export function DemoCards() {
       className="space-y-4"
     >
       {/* Main demo cards */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {/* Demo 1 */}
         <motion.div variants={item}>
           <Card
@@ -257,7 +230,7 @@ export function DemoCards() {
                   onClick={handleDemo3Translate}
                 >
                   <FileText className="mr-1 h-3 w-3" />
-                  English Mode
+                  Translate
                 </Button>
               </div>
             </CardContent>
@@ -272,7 +245,9 @@ export function DemoCards() {
             className="cursor-pointer border-l-4 border-l-gray-300 transition-all hover:shadow-md hover:-translate-y-0.5"
             onClick={() =>
               handleCustomQuery(
-                "고혈압 약 복용 중이고 오늘 혈압이 158mmHg입니다. 헌혈 가능한가요?"
+                locale === "en"
+                  ? "I'm taking blood pressure medication and my BP is 158mmHg today. Can I donate blood?"
+                  : "고혈압 약 복용 중이고 오늘 혈압이 158mmHg입니다. 헌혈 가능한가요?"
               )
             }
           >
@@ -292,99 +267,6 @@ export function DemoCards() {
       </div>
     </motion.div>
   );
-}
-
-// --- SSE Event Handlers ---
-
-function handleSSEEvent(
-  event: { event: string; data: unknown },
-  state: ReturnType<typeof useAppState>
-) {
-  const data = event.data as Record<string, unknown>;
-
-  switch (event.event) {
-    case "classification":
-      state.setClassification(
-        data as unknown as ReturnType<typeof useAppState>["classification"]
-      );
-      break;
-    case "tool_call": {
-      const tcData = data as { step?: number; status?: string; tool?: string; args?: Record<string, string>; result?: string };
-      if (tcData.status === "running") {
-        state.addToolCall({
-          tool: tcData.tool || "",
-          args: tcData.args || {},
-          status: "running",
-        });
-      } else if (tcData.status === "done") {
-        const idx = (tcData.step || 1) - 1;
-        state.updateToolCall(idx, {
-          result: tcData.result,
-          status: "done",
-        });
-      } else {
-        state.addToolCall(tcData as unknown as ReturnType<typeof useAppState>["toolCalls"][0]);
-      }
-      break;
-    }
-    case "tool_result": {
-      const idx = (data as { index?: number }).index ?? state.toolCalls.length - 1;
-      state.updateToolCall(idx, {
-        result: (data as { result?: string }).result,
-        status: "done",
-      });
-      break;
-    }
-    case "judgment":
-      state.setJudgment(
-        data as unknown as ReturnType<typeof useAppState>["judgment"]
-      );
-      break;
-    case "text_delta":
-    case "stream": {
-      const chunk = (data as { text?: string }).text || "";
-      state.appendStreamingText(chunk);
-      break;
-    }
-    case "tool_plan": {
-      state.appendToolPlan((data as { text?: string }).text || "");
-      break;
-    }
-    case "content_delta": {
-      state.appendStreamingText((data as { text?: string }).text || "");
-      break;
-    }
-    case "thinking": {
-      // ignore thinking events for now
-      break;
-    }
-    case "citation": {
-      // ignore citation events for now
-      break;
-    }
-    case "answer":
-      state.setAnswer((data as { text?: string }).text || "");
-      break;
-    case "timing":
-      state.setTiming(data as ReturnType<typeof useAppState>["timing"]);
-      break;
-    case "tokens":
-      state.setTokens(
-        data as unknown as ReturnType<typeof useAppState>["tokens"]
-      );
-      break;
-    case "done": {
-      if (state.streamingText) {
-        state.setAnswer(state.streamingText);
-      }
-      const doneData = data as { total_tokens?: unknown };
-      if (doneData.total_tokens) {
-        state.setTokens(doneData.total_tokens as ReturnType<typeof useAppState>["tokens"]);
-      }
-      state.setIsStreaming(false);
-      break;
-    }
-  }
 }
 
 // --- Simulation Fallbacks (when backend is not available) ---

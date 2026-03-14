@@ -10,10 +10,19 @@ load_dotenv()
 
 CHROMA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_db")
 COLLECTION_NAME = "blood_donation_guidelines"
+COLLECTION_NAME_EN = "blood_donation_guidelines_en"
 
 co = cohere.ClientV2()
 chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
-collection = chroma_client.get_collection(name=COLLECTION_NAME)
+_collections = {}
+
+
+def _get_collection(lang: str = "ko"):
+    """lang에 따라 적절한 Chroma 컬렉션 반환 (lazy load + cache)"""
+    name = COLLECTION_NAME_EN if lang == "en" else COLLECTION_NAME
+    if name not in _collections:
+        _collections[name] = chroma_client.get_collection(name=name)
+    return _collections[name]
 
 # 마지막 API 호출의 rate limit 정보 저장
 _last_rate_limits = {"embed": {}, "rerank": {}}
@@ -80,14 +89,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "calculate_wait_days",
-            "description": "헌혈 유예기간 남은 일수를 정확히 계산. 날짜 계산이 필요할 때 반드시 이 도구를 사용하세요. 직접 계산하지 마세요.",
+            "description": "헌혈 유예기간 남은 시간을 정확히 계산. 날짜/시간 계산이 필요할 때 반드시 이 도구를 사용하세요. 직접 계산하지 마세요. 반드시 시간(hours) 단위로 변환하여 입력하세요. 예: 36시간 유예, 72시간 경과 → deferral_hours=36, elapsed_hours=72. 예: 1년 유예, 3주 경과 → deferral_hours=8760, elapsed_hours=504.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "deferral_days": {"type": "integer", "description": "유예기간 (일수, 예: 365)"},
-                    "elapsed_days": {"type": "integer", "description": "경과일수 (예: 21)"}
+                    "deferral_hours": {"type": "integer", "description": "유예기간 (시간 단위, 예: 36, 8760)"},
+                    "elapsed_hours": {"type": "integer", "description": "경과시간 (시간 단위, 예: 72, 504)"}
                 },
-                "required": ["deferral_days", "elapsed_days"]
+                "required": ["deferral_hours", "elapsed_hours"]
             }
         }
     }
@@ -100,9 +109,20 @@ SOURCE_DISPLAY_NAMES = {
     "guideline_main.pdf": "헌혈 판정기준",
 }
 
+SOURCE_DISPLAY_NAMES_EN = {
+    "guideline_drug.pdf": "Drug Info Center",
+    "guideline_malaria.pdf": "KDCA",
+    "guideline_main.pdf": "Blood Donation Criteria",
+    "guideline_drug_en.pdf": "Drug Info Center",
+    "guideline_malaria_en.pdf": "KDCA",
+    "guideline_main_en.pdf": "Blood Donation Criteria",
+}
 
-def search_guideline(query: str) -> str:
+
+def search_guideline(query: str, lang: str = "ko") -> str:
     """Embed v4로 검색 → Rerank 4.0으로 재랭킹 → 상위 3개 반환"""
+    coll = _get_collection(lang)
+
     # Embed v4로 쿼리 임베딩
     t0 = time.time()
     embed_raw = co.with_raw_response.embed(
@@ -117,9 +137,9 @@ def search_guideline(query: str) -> str:
 
     # ChromaDB 검색 (상위 10개)
     t1 = time.time()
-    results = collection.query(
+    results = coll.query(
         query_embeddings=[query_emb],
-        n_results=min(10, collection.count()),
+        n_results=min(10, coll.count()),
     )
     print(f"[TIMING]   chromadb: {time.time()-t1:.2f}s")
 
@@ -142,18 +162,22 @@ def search_guideline(query: str) -> str:
     print(f"[TIMING]   rerank: {time.time()-t2:.2f}s")
 
     output_parts = []
+    names = SOURCE_DISPLAY_NAMES_EN if lang == "en" else SOURCE_DISPLAY_NAMES
+    source_label = "Source" if lang == "en" else "출처"
+    relevance_label = "relevance" if lang == "en" else "관련도"
     for r in rerank_results.results:
         idx = r.index
         meta = metadatas[idx]
         output_parts.append(
-            f"[출처: {SOURCE_DISPLAY_NAMES.get(meta['source'], meta['source'])}] (관련도: {r.relevance_score:.3f})\n{docs[idx]}"
+            f"[{source_label}: {names.get(meta['source'], meta['source'])}] ({relevance_label}: {r.relevance_score:.3f})\n{docs[idx]}"
         )
 
     return "\n\n---\n\n".join(output_parts)
 
 
-def search_relevance_top1(query: str) -> float:
+def search_relevance_top1(query: str, lang: str = "ko") -> float:
     """쿼리로 검색 후 rerank top-1 relevance score만 반환 (비교용)"""
+    coll = _get_collection(lang)
     embed_resp = co.embed(
         texts=[query],
         model="embed-v4.0",
@@ -161,9 +185,9 @@ def search_relevance_top1(query: str) -> float:
         embedding_types=["float"],
     )
     query_emb = embed_resp.embeddings.float_[0]
-    results = collection.query(
+    results = coll.query(
         query_embeddings=[query_emb],
-        n_results=min(10, collection.count()),
+        n_results=min(10, coll.count()),
     )
     if not results["documents"][0]:
         return 0.0
@@ -177,23 +201,36 @@ def search_relevance_top1(query: str) -> float:
     return rerank_resp.results[0].relevance_score if rerank_resp.results else 0.0
 
 
-def search_drug_info(drug_name: str) -> str:
+def search_drug_info(drug_name: str, lang: str = "ko") -> str:
     """판정기준 문서에서 약물 유예 정보 검색"""
-    return search_guideline(f"{drug_name} 헌혈 유예기간 채혈 가능 여부")
+    if lang == "en":
+        return search_guideline(f"{drug_name} blood donation deferral period eligibility", lang=lang)
+    return search_guideline(f"{drug_name} 헌혈 유예기간 채혈 가능 여부", lang=lang)
 
 
-def check_malaria_risk(region: str) -> str:
+def check_malaria_risk(region: str, lang: str = "ko") -> str:
     """말라리아 위험도 조회 — 판정기준 문서에서 지역 정보 검색"""
-    return search_guideline(f"{region} 말라리아 위험등급 유예기간 헌혈")
+    if lang == "en":
+        return search_guideline(f"{region} malaria risk level deferral period blood donation", lang=lang)
+    return search_guideline(f"{region} 말라리아 위험등급 유예기간 헌혈", lang=lang)
 
 
-def calculate_wait_days(deferral_days: int, elapsed_days: int) -> str:
-    """유예기간 남은 일수를 정확히 계산"""
-    remaining = deferral_days - elapsed_days
+def calculate_wait_days(deferral_hours: int = 0, elapsed_hours: int = 0, **kwargs) -> str:
+    """유예기간 남은 시간을 정확히 계산 (시간 단위)"""
+    # 하위호환: 이전 파라미터명 지원
+    if not deferral_hours and "deferral_days" in kwargs:
+        deferral_hours = kwargs["deferral_days"] * 24
+    if not elapsed_hours and "elapsed_days" in kwargs:
+        elapsed_hours = kwargs["elapsed_days"] * 24
+    remaining = deferral_hours - elapsed_hours
     if remaining <= 0:
-        return f"유예기간 경과 완료. 경과일({elapsed_days}일) >= 유예기간({deferral_days}일). 헌혈 가능합니다."
+        return f"Deferral period complete. Elapsed ({elapsed_hours}h) >= Deferral ({deferral_hours}h). Eligible to donate."
     else:
-        return f"남은 대기일: {remaining}일. 경과일({elapsed_days}일) / 유예기간({deferral_days}일). 아직 헌혈 불가합니다."
+        remaining_days = remaining / 24
+        if remaining_days >= 1:
+            return f"Remaining wait: {remaining_days:.1f} days ({remaining}h). Elapsed ({elapsed_hours}h) / Deferral ({deferral_hours}h). Not yet eligible."
+        else:
+            return f"Remaining wait: {remaining} hours. Elapsed ({elapsed_hours}h) / Deferral ({deferral_hours}h). Not yet eligible."
 
 
 # 툴 이름 → 실행 함수 매핑
@@ -205,11 +242,14 @@ TOOL_FUNCTIONS = {
 }
 
 
-def execute_tool(name: str, args: dict) -> str:
+def execute_tool(name: str, args: dict, lang: str = "ko") -> str:
     """툴 이름과 인자로 실행"""
     fn = TOOL_FUNCTIONS.get(name)
     if fn is None:
         return f"알 수 없는 툴: {name}"
+    # lang을 지원하는 검색 도구에만 전달
+    if name in ("search_guideline", "search_drug_info", "check_malaria_risk"):
+        return fn(**args, lang=lang)
     return fn(**args)
 
 

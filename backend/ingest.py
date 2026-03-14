@@ -11,11 +11,18 @@ load_dotenv()
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 CHROMA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_db")
 COLLECTION_NAME = "blood_donation_guidelines"
+COLLECTION_NAME_EN = "blood_donation_guidelines_en"
 
 PDF_FILES = [
     "guideline_drug.pdf",
     "guideline_malaria.pdf",
     "guideline_main.pdf",
+]
+
+PDF_FILES_EN = [
+    "guideline_drug_en.pdf",
+    "guideline_malaria_en.pdf",
+    "guideline_main_en.pdf",
 ]
 
 
@@ -54,17 +61,17 @@ def embed_chunks(co: cohere.ClientV2, chunks: list[dict], batch_size: int = 96) 
     return all_embeddings
 
 
-def store_to_chromadb(chunks: list[dict], embeddings: list[list[float]]):
+def store_to_chromadb(chunks: list[dict], embeddings: list[list[float]], collection_name: str = COLLECTION_NAME):
     """ChromaDB에 청크와 임베딩 저장"""
     client = chromadb.PersistentClient(path=CHROMA_DIR)
 
     # 기존 컬렉션 삭제 후 재생성
     existing = [c.name for c in client.list_collections()]
-    if COLLECTION_NAME in existing:
-        client.delete_collection(COLLECTION_NAME)
+    if collection_name in existing:
+        client.delete_collection(collection_name)
 
     collection = client.create_collection(
-        name=COLLECTION_NAME,
+        name=collection_name,
         metadata={"hnsw:space": "cosine"},
     )
 
@@ -82,24 +89,41 @@ def store_to_chromadb(chunks: list[dict], embeddings: list[list[float]]):
     return collection
 
 
-def run():
-    """전체 인제스트 파이프라인 실행"""
-    co = cohere.ClientV2()
-
+def _ingest_collection(co, pdf_files: list[str], collection_name: str, label: str):
+    """PDF 리스트 → 임베딩 → ChromaDB 컬렉션 저장"""
     all_chunks = []
-    for pdf_file in PDF_FILES:
+    for pdf_file in pdf_files:
         path = os.path.join(DATA_DIR, pdf_file)
+        if not os.path.exists(path):
+            print(f"⚠ 파일 없음, 건너뜀: {pdf_file}")
+            continue
         chunks = parse_pdf(path)
         all_chunks.extend(chunks)
         print(f"파싱 완료: {pdf_file} → {len(chunks)}개 청크")
 
-    print(f"\n총 {len(all_chunks)}개 청크 임베딩 중...")
+    if not all_chunks:
+        print(f"⚠ {label}: 청크 없음, 건너뜀")
+        return
+
+    print(f"\n[{label}] 총 {len(all_chunks)}개 청크 임베딩 중...")
     embeddings = embed_chunks(co, all_chunks)
     print(f"임베딩 완료: {len(embeddings)}개 벡터 (차원: {len(embeddings[0])})")
 
-    collection = store_to_chromadb(all_chunks, embeddings)
-    print(f"\nChromaDB 저장 완료: {collection.count()}개 문서")
-    print(f"저장 경로: {CHROMA_DIR}")
+    collection = store_to_chromadb(all_chunks, embeddings, collection_name)
+    print(f"ChromaDB 저장 완료: {collection.count()}개 문서 ({collection_name})")
+
+
+def run():
+    """전체 인제스트 파이프라인 실행"""
+    co = cohere.ClientV2()
+
+    # 한국어 컬렉션
+    _ingest_collection(co, PDF_FILES, COLLECTION_NAME, "KO")
+
+    # 영어 컬렉션
+    _ingest_collection(co, PDF_FILES_EN, COLLECTION_NAME_EN, "EN")
+
+    print(f"\n저장 경로: {CHROMA_DIR}")
 
 
 if __name__ == "__main__":

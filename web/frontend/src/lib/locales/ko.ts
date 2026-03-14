@@ -51,6 +51,7 @@ export const ko = {
   "judgment.conditional": "조건부",
   "judgment.ineligible": "불가",
   "judgment.wait_days": "대기: {days}일",
+  "judgment.source": "출처",
 
   // Chat input
   "chat.placeholder": "헌혈 관련 질문을 입력하세요...",

@@ -53,6 +53,7 @@ export const en: Record<LocaleKey, string> = {
   "judgment.conditional": "Conditional",
   "judgment.ineligible": "Ineligible",
   "judgment.wait_days": "Wait: {days} days",
+  "judgment.source": "Source",
 
   // Chat input
   "chat.placeholder": "Ask a blood donation question...",

@@ -10,6 +10,7 @@ export interface SSEEvent {
 export interface ChatMessage {
   query: string;
   model?: string;
+  lang?: string;
 }
 
 export interface ToolCall {
@@ -75,12 +76,14 @@ export interface TokenUsage {
 // --- SSE Streaming ---
 
 export async function* streamChat(
-  msg: ChatMessage
+  msg: ChatMessage,
+  signal?: AbortSignal
 ): AsyncGenerator<SSEEvent, void, unknown> {
   const response = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(msg),
+    signal,
   });
 
   if (!response.ok) {
@@ -94,6 +97,7 @@ export async function* streamChat(
   let buffer = "";
 
   while (true) {
+    if (signal?.aborted) return;
     const { done, value } = await reader.read();
     if (done) break;
 
@@ -106,6 +110,7 @@ export async function* streamChat(
       if (line.startsWith("event:")) {
         currentEvent = line.slice(6).trim();
       } else if (line.startsWith("data:")) {
+        if (signal?.aborted) return;
         const dataStr = line.slice(5).trim();
         if (dataStr) {
           try {
@@ -122,11 +127,11 @@ export async function* streamChat(
 
 // --- Compare Models ---
 
-export async function fetchCompare(query: string): Promise<CompareResult> {
+export async function fetchCompare(query: string, lang?: string): Promise<CompareResult> {
   const response = await fetch(`${API_BASE}/api/chat/compare`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, lang: lang || "ko" }),
   });
 
   if (!response.ok) {
@@ -138,13 +143,14 @@ export async function fetchCompare(query: string): Promise<CompareResult> {
 
 // --- Vision ---
 
-export async function analyzeVision(file: File): Promise<VisionResult> {
+export async function analyzeVision(file: File, signal?: AbortSignal): Promise<VisionResult> {
   const formData = new FormData();
   formData.append("file", file);
 
   const response = await fetch(`${API_BASE}/api/vision`, {
     method: "POST",
     body: formData,
+    signal,
   });
 
   if (!response.ok) {

@@ -1,20 +1,65 @@
-"""Command A Reasoning 기반 헌혈 문진 에이전트"""
+"""Command A / A Reasoning 기반 헌혈 문진 에이전트"""
 
 import json
-import sys
 import time
 from datetime import date
 import cohere
 from cohere.types.thinking import Thinking
 from dotenv import load_dotenv
-from backend.tools import TOOLS, execute_tool, get_rate_limits, _extract_limits
+from backend.tools import TOOLS, execute_tool, get_rate_limits
 
 load_dotenv()
 
-from backend.classifier import MODEL_FAST, MODEL_REASONING, classify_query
+from backend.classifier import MODEL_REASONING, classify_query
 
-def _build_system_prompt() -> str:
+
+def _build_system_prompt(lang: str = "ko") -> str:
     today = date.today().isoformat()
+    if lang == "en":
+        return f"""You are a Korean Red Cross blood donation screening support AI.
+Today's date: {today}
+
+Role:
+- Provide accurate answers by searching screening guideline documents for donor questions.
+- Comprehensively evaluate drug intake, travel history, health conditions, etc.
+- Always cite sources in every answer.
+
+CRITICAL LANGUAGE RULE: You MUST answer ONLY in English. Never use Korean in your response.
+All guideline documents and tool results are in English. Respond entirely in English.
+
+Screening logic (follow this order strictly):
+1. Check the deferral period for the drug/action.
+2. Calculate elapsed time from the intake/visit date.
+3. Elapsed time >= deferral period → "Eligible" (eligible: true, wait_days: 0)
+4. Elapsed time < deferral period → "Conditional" (eligible: false, wait_days: remaining days)
+5. "Conditionally eligible" in guidelines is a drug category classification, not the final decision.
+   Always compare elapsed time with deferral period to determine the final decision (Eligible/Conditional/Ineligible).
+6. If whole blood and component donation deferral periods differ, assess based on whole blood and note component restrictions in reason.
+
+Tool usage principles:
+- Travel questions: Check risk level with check_malaria_risk, then cross-verify with search_guideline.
+- Drug questions: Check with search_drug_info. For complex conditions, also call search_guideline.
+- Complex conditions (drug + BP, etc.): Call relevant tools individually per condition for cross-verification.
+- **Never calculate dates/days manually. Always use the calculate_wait_days tool. Convert ALL values to HOURS first.**
+  e.g., 36-hour deferral, 3 days elapsed → calculate_wait_days(deferral_hours=36, elapsed_hours=72)
+  e.g., 1-year deferral, 21 days elapsed → calculate_wait_days(deferral_hours=8760, elapsed_hours=504)
+- MANDATORY: If ANY deferral period exists, you MUST call calculate_wait_days to compute remaining time.
+  Never skip this tool. Never calculate days manually.
+  For "last month" use 30 days = 720 hours. For "last week" use 7 days = 168 hours.
+
+Response format:
+- Answer in English.
+- Clearly state the assessment result: "eligible to donate" or "not yet eligible" with remaining wait days.
+- Always include [Source: X] citation tags (e.g., [Source: Drug Info Center]).
+- Specify wait days if there is a deferral period.
+- At the very end of your answer, include this exact tag on a new line:
+  [JUDGMENT: condition=Eligible|Conditional|Ineligible, wait_days=N, source=SOURCE_NAME]
+  Example: [JUDGMENT: condition=Eligible, wait_days=0, source=Drug Info Center]
+  Example: [JUDGMENT: condition=Conditional, wait_days=155, source=Blood Donation Criteria]
+  This tag is parsed by the system — do not omit or modify the format.
+
+CRITICAL: ALL your outputs — tool plans, reasoning, and final answers — MUST be in English.
+"""
     return f"""당신은 대한적십자사 헌혈 문진 지원 AI입니다.
 오늘 날짜: {today}
 
@@ -41,33 +86,45 @@ def _build_system_prompt() -> str:
 - 여행력 질문: check_malaria_risk로 위험등급 확인 후, search_guideline으로 해당 등급의 보류 규정을 교차 검증합니다.
 - 약물 질문: search_drug_info로 약물 정보를 확인합니다. 복합 조건이면 search_guideline도 추가 호출합니다.
 - 복합 조건(약물 + 혈압 등): 각 조건별로 관련 도구를 개별 호출하여 교차 검증합니다.
-- **날짜/일수 계산은 절대로 직접 하지 마세요. 반드시 calculate_wait_days 도구를 사용하세요.**
-  예: 유예기간 365일, 경과 21일 → calculate_wait_days(deferral_days=365, elapsed_days=21)
+- **날짜/일수 계산은 절대로 직접 하지 마세요. 반드시 calculate_wait_days 도구를 사용하세요. 모든 값을 시간(hours) 단위로 변환하여 입력하세요.**
+  예: 36시간 유예, 3일 경과 → calculate_wait_days(deferral_hours=36, elapsed_hours=72)
+  예: 1년 유예, 21일 경과 → calculate_wait_days(deferral_hours=8760, elapsed_hours=504)
+- 필수: 유예기간이 있으면 반드시 calculate_wait_days를 호출하세요. 이 도구를 건너뛰지 마세요.
+  "지난달" = 30일 = 720시간, "지난주" = 7일 = 168시간으로 변환하세요.
 
 응답 형식:
 - 한국어로 답변합니다.
-- 판정 결과를 명확히 제시합니다 (즉시가능 / 조건부 / 불가).
-- 유예기간이 있는 경우 일수를 명시합니다.
+- 판정 결과를 명확히 제시합니다: "즉시가능", "조건부", "불가" 중 하나를 반드시 포함하세요.
+- 유예기간이 있는 경우 남은 일수를 명시합니다.
+- 반드시 [출처: X] 태그를 포함하세요 (예: [출처: 약학정보원]).
+- 답변 마지막에 반드시 다음 태그를 새 줄에 포함하세요:
+  [JUDGMENT: condition=즉시가능|조건부|불가, wait_days=N, source=출처명]
+  예: [JUDGMENT: condition=즉시가능, wait_days=0, source=약학정보원]
+  예: [JUDGMENT: condition=조건부, wait_days=155, source=헌혈 판정기준]
+  이 태그는 시스템이 파싱합니다 — 형식을 변경하지 마세요.
 """
 
-JUDGMENT_SCHEMA = {
-    "type": "json_object",
-    "json_schema": {
-        "type": "object",
-        "properties": {
-            "eligible": {"type": "boolean", "description": "헌혈 가능 여부"},
-            "condition": {"type": "string", "description": "즉시가능 / 조건부 / 불가"},
-            "reason": {"type": "string", "description": "판정 근거 (한국어)"},
-            "wait_days": {"type": "integer", "description": "유예기간 (일, 없으면 0)"},
-            "citation": {"type": "string", "description": "참조한 출처를 쉼표로 구분 (약학정보원, 질병관리청, 헌혈 판정기준 중 해당하는 것 모두)"},
-            "answer": {"type": "string", "description": "사용자에게 보여줄 상세 답변. 한국어, 출처 포함, 마크다운 사용 가능."},
-        },
-        "required": ["eligible", "condition", "reason", "answer"],
-    }
-}
+
+def _extract_judgment(answer_text: str, lang: str = "ko") -> dict:
+    """답변 끝의 [JUDGMENT: ...] 태그에서 판정 추출"""
+    import re
+    match = re.search(
+        r'\[JUDGMENT:\s*condition=([^,]+),\s*wait_days=(\d+),\s*source=([^\]]+)\]',
+        answer_text
+    )
+    if match:
+        condition = match.group(1).strip()
+        wait_days = int(match.group(2))
+        source = match.group(3).strip()
+        eligible = condition in ("Eligible", "즉시가능")
+        return {"eligible": eligible, "condition": condition, "reason": "", "wait_days": wait_days, "citation": source}
+
+    # fallback: 태그 없으면 기본값
+    return {"eligible": False, "condition": "Conditional" if lang == "en" else "조건부",
+            "reason": "", "wait_days": 0, "citation": ""}
 
 
-def run_agent(query: str, thinking_enabled: bool = False, thinking_budget: int = 2000, model: str = None):
+def run_agent(query: str, thinking_enabled: bool = False, thinking_budget: int = 2000, model: str = None, lang: str = "ko"):
     """에이전트 실행: 툴 호출 루프 → 최종 판정 JSON 반환"""
     t_start = time.time()
     co = cohere.ClientV2()
@@ -80,13 +137,14 @@ def run_agent(query: str, thinking_enabled: bool = False, thinking_budget: int =
         thinking_enabled = classification["thinking"]
 
     messages = [
-        {"role": "system", "content": _build_system_prompt()},
+        {"role": "system", "content": _build_system_prompt(lang)},
         {"role": "user", "content": query},
     ]
 
     tool_logs = []
     total_tokens = {"input_tokens": 0, "output_tokens": 0}
     thinking_content = None
+    answer_text = ""
 
     # 툴 호출 루프 (최대 5회)
     t_tool = time.time()
@@ -116,8 +174,12 @@ def run_agent(query: str, thinking_enabled: bool = False, thinking_budget: int =
                 if hasattr(block, "type") and block.type == "thinking":
                     thinking_content = block.thinking
 
-        # 툴 호출이 없으면 루프 종료
+        # 툴 호출이 없으면 루프 종료 — 모델의 텍스트 응답이 answer
         if response.finish_reason != "TOOL_CALL":
+            if response.message and response.message.content:
+                for block in response.message.content:
+                    if hasattr(block, "text") and block.text:
+                        answer_text += block.text
             break
 
         # 툴 호출 처리
@@ -127,7 +189,7 @@ def run_agent(query: str, thinking_enabled: bool = False, thinking_budget: int =
             for tc in response.message.tool_calls:
                 fn_name = tc.function.name
                 fn_args = json.loads(tc.function.arguments) if isinstance(tc.function.arguments, str) else tc.function.arguments
-                result = execute_tool(fn_name, fn_args)
+                result = execute_tool(fn_name, fn_args, lang=lang)
 
                 preview = result[:2000] + "..." if len(result) > 2000 else result
                 tool_logs.append({
@@ -147,41 +209,9 @@ def run_agent(query: str, thinking_enabled: bool = False, thinking_budget: int =
     t_tool_elapsed = time.time() - t_tool
     print(f"[TIMING]tool_loop: {t_tool_elapsed:.2f}s ({len(tool_logs)} tools)")
 
-    # 최종 판정 JSON 생성 (response_format 사용, tools 없이)
+    # 판정 추출 (답변 텍스트에서 — API 호출 없음)
     t_judgment = time.time()
-    messages_for_judgment = list(messages)
-    messages_for_judgment.append({
-        "role": "user",
-        "content": "위 정보를 바탕으로 헌혈 가능 여부를 JSON으로 판정해주세요. eligible, condition(즉시가능/조건부/불가), reason, wait_days, citation, answer 필드를 포함하세요. answer에는 사용자에게 보여줄 상세 답변(한국어, 출처 포함)을 작성하세요."
-    })
-
-    judgment_params = {
-        "model": model,
-        "messages": messages_for_judgment,
-        "response_format": JUDGMENT_SCHEMA,
-        "safety_mode": "CONTEXTUAL",
-        "thinking": Thinking(type="disabled"),
-    }
-
-    judgment_raw = co.with_raw_response.chat(**judgment_params)
-    chat_limits = _extract_limits(judgment_raw.headers)
-    judgment_response = judgment_raw.data
-    if judgment_response.usage and judgment_response.usage.tokens:
-        total_tokens["input_tokens"] += judgment_response.usage.tokens.input_tokens or 0
-        total_tokens["output_tokens"] += judgment_response.usage.tokens.output_tokens or 0
-
-    # 판정 JSON 파싱
-    judgment_text = ""
-    if judgment_response.message and judgment_response.message.content:
-        for block in judgment_response.message.content:
-            if hasattr(block, "text"):
-                judgment_text += block.text
-
-    judgment = json.loads(judgment_text) if judgment_text else {}
-
-    # answer는 judgment에서 추출 (LLM 3회 → 2회 최적화)
-    answer_text = judgment.pop("answer", "")
-
+    judgment = _extract_judgment(answer_text, lang)
     t_judgment_elapsed = time.time() - t_judgment
     t_total = time.time() - t_start
     print(f"[TIMING]judgment: {t_judgment_elapsed:.2f}s")
@@ -194,10 +224,9 @@ def run_agent(query: str, thinking_enabled: bool = False, thinking_budget: int =
         "total": round(t_total, 2),
     }
 
-    # rate limits 수집 (embed/rerank는 tools.py에서, chat은 여기서)
     tool_rate_limits = get_rate_limits()
     rate_limits = {
-        "chat": chat_limits,
+        "chat": {},
         "embed": tool_rate_limits.get("embed", {}),
         "rerank": tool_rate_limits.get("rerank", {}),
     }
@@ -225,8 +254,8 @@ def _collect_tokens(chunk, total_tokens):
             total_tokens["output_tokens"] += getattr(usage.tokens, 'output_tokens', 0) or 0
 
 
-def run_agent_stream(query: str, thinking_enabled: bool = False, thinking_budget: int = 2000, model: str = None):
-    """에이전트 실행 (실시간 스트리밍): co.chat_stream()으로 각 토큰 즉시 yield"""
+def run_agent_stream(query: str, thinking_enabled: bool = False, thinking_budget: int = 2000, model: str = None, lang: str = "ko"):
+    """에이전트 실행 (실시간 스트리밍): 도구 루프의 content_delta가 답변, judgment는 구조화 필드만"""
     t_start = time.time()
     co = cohere.ClientV2()
 
@@ -242,16 +271,17 @@ def run_agent_stream(query: str, thinking_enabled: bool = False, thinking_budget
     yield {"type": "classification", "classification": classification}
 
     messages = [
-        {"role": "system", "content": _build_system_prompt()},
+        {"role": "system", "content": _build_system_prompt(lang)},
         {"role": "user", "content": query},
     ]
 
     total_tokens = {"input_tokens": 0, "output_tokens": 0}
     step = 0
+    answer_text = ""  # content_delta 누적용
 
     use_thinking = thinking_enabled and model == MODEL_REASONING
 
-    # 2) 툴 호출 루프 — co.chat_stream()으로 실시간 스트리밍
+    # 2) 툴 호출 루프 — content_delta가 프론트엔드에 실시간 스트리밍됨
     t_tool = time.time()
     for _ in range(5):
         chat_params = {
@@ -267,9 +297,7 @@ def run_agent_stream(query: str, thinking_enabled: bool = False, thinking_budget
         elif model == MODEL_REASONING:
             chat_params["thinking"] = Thinking(type="disabled")
 
-        # 스트리밍 호출 — 각 토큰이 생성될 때마다 즉시 yield
-        tool_calls_buf = []  # [{id, name, args_str, step}]
-        content_text = ""
+        tool_calls_buf = []
         finish_reason = None
 
         for chunk in co.chat_stream(**chat_params):
@@ -296,13 +324,9 @@ def run_agent_stream(query: str, thinking_enabled: bool = False, thinking_budget
 
             elif chunk.type == "content-delta":
                 text = chunk.delta.message.content.text or ""
-                content_text += text
                 if text:
+                    answer_text += text
                     yield {"type": "content_delta", "text": text}
-
-            elif chunk.type == "content-start":
-                if hasattr(chunk.delta.message.content, 'type') and chunk.delta.message.content.type == "thinking":
-                    pass  # thinking content-start
 
             elif chunk.type == "message-end":
                 finish_reason = chunk.delta.finish_reason
@@ -310,7 +334,6 @@ def run_agent_stream(query: str, thinking_enabled: bool = False, thinking_budget
 
         # 스트림 종료 후: 도구 실행
         if finish_reason == "TOOL_CALL" and tool_calls_buf:
-            # assistant 메시지 재구성 (Cohere API 형식)
             reconstructed_tc = []
             for tc_data in tool_calls_buf:
                 reconstructed_tc.append({
@@ -323,10 +346,9 @@ def run_agent_stream(query: str, thinking_enabled: bool = False, thinking_budget
                 })
             messages.append({"role": "assistant", "tool_calls": reconstructed_tc})
 
-            # 각 도구 실행 → 즉시 yield
             for tc_data in tool_calls_buf:
                 fn_args = json.loads(tc_data["args_str"]) if tc_data["args_str"] else {}
-                result = execute_tool(tc_data["name"], fn_args)
+                result = execute_tool(tc_data["name"], fn_args, lang=lang)
                 preview = result[:2000] + "..." if len(result) > 2000 else result
 
                 yield {
@@ -345,36 +367,14 @@ def run_agent_stream(query: str, thinking_enabled: bool = False, thinking_budget
                     "content": result,
                 })
         else:
-            # 도구 호출 없음 — 루프 탈출
             break
 
     t_tool_elapsed = time.time() - t_tool
     print(f"[TIMING]tool_loop: {t_tool_elapsed:.2f}s ({step} tools)")
 
-    # 3) 판정 생성 (스트리밍)
+    # 3) 판정 추출 (답변 텍스트에서 — API 호출 없음)
     t_judgment = time.time()
-    messages_for_judgment = list(messages)
-    messages_for_judgment.append({
-        "role": "user",
-        "content": "위 정보를 바탕으로 헌혈 가능 여부를 JSON으로 판정해주세요. eligible, condition(즉시가능/조건부/불가), reason, wait_days, citation, answer 필드를 포함하세요. answer에는 사용자에게 보여줄 상세 답변(한국어, 출처 포함)을 작성하세요."
-    })
-
-    judgment_text = ""
-    for chunk in co.chat_stream(
-        model=model,
-        messages=messages_for_judgment,
-        response_format=JUDGMENT_SCHEMA,
-        safety_mode="CONTEXTUAL",
-        thinking=Thinking(type="disabled"),
-    ):
-        if chunk.type == "content-delta":
-            judgment_text += chunk.delta.message.content.text
-        elif chunk.type == "message-end":
-            _collect_tokens(chunk, total_tokens)
-
-    judgment = json.loads(judgment_text) if judgment_text else {}
-    answer_text = judgment.pop("answer", "")
-
+    judgment = _extract_judgment(answer_text, lang)
     t_judgment_elapsed = time.time() - t_judgment
     t_total = time.time() - t_start
     print(f"[TIMING]judgment: {t_judgment_elapsed:.2f}s")
@@ -387,13 +387,7 @@ def run_agent_stream(query: str, thinking_enabled: bool = False, thinking_budget
         "total": round(t_total, 2),
     }
 
-    # 4) 판정 결과 전송
-    yield {"type": "judgment", "judgment": judgment, "timing": timing}
-
-    # 5) 답변 전송
-    yield {"type": "answer", "text": answer_text}
-
-    # 6) 완료
+    # 4) 완료 먼저 전송 → 프론트엔드가 즉시 답변 확정 (isStreaming=false)
     tool_rate_limits = get_rate_limits()
     rate_limits = {
         "chat": {},
@@ -406,6 +400,9 @@ def run_agent_stream(query: str, thinking_enabled: bool = False, thinking_budget
         "total_tokens": total_tokens,
         "rate_limits": rate_limits,
     }
+
+    # 5) 판정 카드 — done 이후에 자연스럽게 나타남
+    yield {"type": "judgment", "judgment": judgment, "timing": timing}
 
 
 if __name__ == "__main__":
